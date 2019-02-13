@@ -190,13 +190,15 @@ def build_vt_comment(alert):
         a_mod_dict_list.append({'type': a_type,
                                 'name': a_name,
                                 'result': a_mod_results[a_mod]})
-        #comment_text += "\t{}\n".format(a_mod)
+        # putting this here instead of our pretty table
+        comment_text += "\t{} - Results: {}\n".format(a_name, a_mod_results[a_mod])
 
     fmt = [('Type', 'type', max_type_length),
            ('Name', 'name', max_name_length),
            ('Results', 'result', 8)]
 
-    comment_text += TablePrinter(fmt, sep='  ', ul='=')(a_mod_dict_list)
+    # VT gives no shits about our pretty table
+    #comment_text += TablePrinter(fmt, sep='  ', ul='=')(a_mod_dict_list)
     comment_text += '\n'
 
     return comment_text

@@ -204,6 +204,11 @@ def build_vt_comment(alert):
     return comment_text
 
 def main():
+    DEFAULT_DIR = '/opt/vt-ace-agent/'
+    config_path = os.path.join(DEFAULT_DIR, "etc", "vt-ace-agent.ini")
+    # if there is a local config, use it
+    if os.path.exists(os.path.join("etc", "vt-ace-agent.ini")):
+        config_path = os.path.join("etc", "vt-ace-agent.ini")
     try:
         config = ConfigParser()
         config.read(os.path.join("etc", "vt-ace-agent.ini"))

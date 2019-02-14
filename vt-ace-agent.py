@@ -269,7 +269,7 @@ def main():
         ace_api.set_default_ssl_ca_path(ssl_ca_path)
         if not args.description:
             args.description = args.resource
-        analysis = ace_api.Analysis(args.description,
+        analysis = ace_api.Analysis(description=args.description,
                                     analysis_mode=analysis_mode,
                                     tool='VT ACE Agent')
         cp_result = None

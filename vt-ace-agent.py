@@ -219,7 +219,7 @@ def main():
         config_path = os.path.join("etc", "vt-ace-agent.ini")
     try:
         config = ConfigParser()
-        config.read(os.path.join("etc", "vt-ace-agent.ini"))
+        config.read(config_path)
     except ImportError:
         raise SystemExit('config was not found or was not accessible.')
 

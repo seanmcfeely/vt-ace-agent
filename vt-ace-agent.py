@@ -71,6 +71,7 @@ class VT_Resource():
             with open(resource, 'rb') as fp:
                 self.sha256_hash = hashlib.sha256(fp.read()).hexdigest()
             self.resource = self.sha256_hash
+        self.submission_names = []
 
         self.vt = PrivateApi(api_key=config['global']['api_key'], proxies=proxies)
 
@@ -107,16 +108,18 @@ class VT_Resource():
         if self.url:
             self.url_result = self.vt.get_url_report(self.resource)
             self.result_type = 'url'
-            return self.url_result
         else:
             self.file_result = self.vt.get_file_report(self.resource)
             self.result_type = 'file'
-            return self.file_result
+        if 'submission_names' in self.results:
+            self.submission_names = self.results['submission_names']
+        return self.results
 
     def download(self, output_path=None):
         if self.result_type is None:
             self.search()
         if self.url_result:
+            # change the resource to the file sha256
             if self.url_result['results']['response_code'] == 0:
                 print(result['results']['verbose_msg'])
                 return False
@@ -125,10 +128,15 @@ class VT_Resource():
             except KeyError as e:
                 print("Failed to get SHA-256 of content at '{}'".format(self.url))
                 return False
+
+        file_name = output_path if output_path else self.resource
+        if output_path is None:
+            if self.submission_names:
+                # use whatever file name has been used the most
+                file_name = max(set(self.submission_names), key=self.submission_names.count)
         
         result = self.vt.get_file(self.resource)
         if 'results' in result:
-            file_name = output_path if output_path else self.resource
             with open(file_name, 'wb') as fp:
                 fp.write(result['results'])
             self.file_path = file_name
@@ -139,22 +147,22 @@ class VT_Resource():
             return False
 
 
-def build_vt_comment(alert):
-    assert isinstance(alert, ace_api.Analysis)
+def build_vt_comment(results):
+    assert isinstance(results, dict)
 
-    ace_web_url = 'https://{}/ace/analysis?direct={}'.format(alert.remote_host, alert.uuid)
+    ace_web_url = 'https://{}/ace/analysis?direct={}'.format(ace_api.default_remote_host, results['uuid'])
 
-    comment_text = "ACE Result\n=========\n\n"
-    comment_text += "        Link: {}\n\n".format(ace_web_url)
+    #results = ace_api.get_analysis(alert.uuid)
+    desc = results['description']
 
-    results = ace_api.get_analysis(alert.uuid)
-    desc = results['result']['description']
-    o_keys = results['result']['observables']
-    observables = results['result']['observable_store']
-    tags = results['result']['tags']
+    comment_text = "ACE Result - {}\n\n==============\n\n".format(desc)
+    comment_text += "\tLink: {}\n\n".format(ace_web_url)
+
+    observables = results['observable_store']
+    tags = results['tags']
     analysis_modules = []
     a_mod_results = {}
-    for o_key in o_keys:
+    for o_key in observables.keys():
         o_value = observables[o_key]
         tags.extend([tag for tag in o_value['tags'] if tag not in tags])
         a_mods = o_value['analysis']
@@ -198,7 +206,7 @@ def build_vt_comment(alert):
            ('Results', 'result', 8)]
 
     # VT gives no shits about our pretty table
-    #comment_text += TablePrinter(fmt, sep='  ', ul='=')(a_mod_dict_list)
+    #print(TablePrinter(fmt, sep='  ', ul='=')(a_mod_dict_list))
     comment_text += '\n'
 
     return comment_text
@@ -223,6 +231,7 @@ def main():
     parser.add_argument('-s', '--vt-search', action='store_true', help="Search for a hash/URL on VT")
     parser.add_argument('-d', '--description', action='store', default=None, help='A description to give the ACE alert (default: resource).')
     parser.add_argument('--force-ace-alert', dest='force', action='store_true', help='Analysis mode set to correlation and VT results ignored')
+    parser.add_argument('--no-comment', action='store_true', help="Don't commend on VT.")
     args = parser.parse_args()
 
     proxies = {}
@@ -234,12 +243,7 @@ def main():
     vtr = VT_Resource(args.resource, config, proxies=proxies)
 
     if args.vt_search:
-        result = vtr.search()
-        if 'results' in result:
-            result = result['results']
-            pprint.pprint(result) 
-        else:
-            print(result)
+        pprint.pprint(vtr.search())
     elif args.vt_download:
         sys.exit(vtr.download())
     else:
@@ -268,13 +272,19 @@ def main():
         analysis = ace_api.Analysis(args.description,
                                     analysis_mode=analysis_mode,
                                     tool='VT ACE Agent')
+        cp_result = None
         if vtr.result_type == 'file':
             if not vtr.file_path:
                 vtr.download()
             analysis.add_file(vtr.file_path)
+            analysis.submit()
         elif vtr.result_type == 'url':
-            analysis.add_url(vtr.url, directives=['crawl'])
-        analysis.submit()
+            cp_result = ace_api.cloudphish_submit(vtr.url)
+            #analysis.add_url(vtr.url, directives=['crawl'])
+            if 'uuid' in cp_result:
+                # this is a little miss-leading
+                analysis.uuid = cp_result['uuid']
+
         if not analysis.uuid:
             print("Problem submitting analysis to ACE : {}".format(analysis))
             sys.exit(1)
@@ -298,13 +308,14 @@ def main():
         else:
             print("Gave up waiting for ACE to complete the Analysis.")
 
-        comment_text = build_vt_comment(analysis)
-        if alert: 
+        if alert:
+            comment_text = build_vt_comment(analysis) 
             ace_web_url = 'https://{}/ace/analysis?direct={}'.format(analysis.remote_host, analysis.uuid)
             print("The Analysis became an Alert with {} detections: \n\tUUID = {}\n\tACE URL: {}".format(alert['detection_count'], analysis.uuid, ace_web_url))
             print("\nVT Comment Text:\n")
             print(comment_text)
-            pprint.pprint(vtr.make_comment(comment_text))
+            if not args.no_comment:
+                pprint.pprint(vtr.make_comment(comment_text))
             print()
 
 if __name__ == '__main__':

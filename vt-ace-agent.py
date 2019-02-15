@@ -52,7 +52,6 @@ class TablePrinter(object):
             res.insert(1, _r(self.ul))
         return '\n'.join(res)
 
-#def create_ace_alert(resource)
 class VT_Resource():
 
     def __init__(self, resource, config, proxies={}):
@@ -71,7 +70,7 @@ class VT_Resource():
             with open(resource, 'rb') as fp:
                 self.sha256_hash = hashlib.sha256(fp.read()).hexdigest()
             self.resource = self.sha256_hash
-        self.submission_names = []
+        self.greatest_common_filename = None
 
         self.vt = PrivateApi(api_key=config['global']['api_key'], proxies=proxies)
 
@@ -112,7 +111,7 @@ class VT_Resource():
             self.file_result = self.vt.get_file_report(self.resource)
             self.result_type = 'file'
         if 'submission_names' in self.results:
-            self.submission_names = self.results['submission_names']
+            self.greatest_common_filename = max(set(self.results['submission_names']), key=self.results['submission_names'].count)
         return self.results
 
     def download(self, output_path=None):
@@ -130,11 +129,9 @@ class VT_Resource():
                 return False
 
         file_name = output_path if output_path else self.resource
-        if output_path is None:
-            if self.submission_names:
-                # use whatever file name has been used the most
-                file_name = max(set(self.submission_names), key=self.submission_names.count)
-        
+        if output_path is None and self.greatest_common_filename is not None:
+            file_name = self.greatest_common_filename
+
         result = self.vt.get_file(self.resource)
         if 'results' in result:
             with open(file_name, 'wb') as fp:
@@ -147,12 +144,12 @@ class VT_Resource():
             return False
 
 
-def build_vt_comment(results):
-    assert isinstance(results, dict)
+def build_vt_comment(alert):
+    assert isinstance(alert, ace_api.Analysis)
 
-    ace_web_url = 'https://{}/ace/analysis?direct={}'.format(ace_api.default_remote_host, results['uuid'])
+    ace_web_url = 'https://{}/ace/analysis?direct={}'.format(ace_api.default_remote_host, alert.uuid)
 
-    #results = ace_api.get_analysis(alert.uuid)
+    results = ace_api.get_analysis(alert.uuid)['result']
     desc = results['description']
 
     comment_text = "ACE Result - {}\n\n==============\n\n".format(desc)
@@ -168,7 +165,7 @@ def build_vt_comment(results):
         a_mods = o_value['analysis']
         a_mod_names = [a[len('saq.modules.'):] for a in a_mods.keys()]
         # update our list
-        analysis_modules = [a for a in a_mod_names if a not in analysis_modules] 
+        analysis_modules.extend([a for a in a_mod_names if a not in analysis_modules]) 
         for a_key in a_mods.keys():
             a_mod = a_mods[a_key]
             if a_mod:
@@ -224,14 +221,16 @@ def main():
         raise SystemExit('config was not found or was not accessible.')
 
     profiles = config.sections()
+    profiles.remove('global')
     parser = argparse.ArgumentParser(description="A handy tool for pimping ACE out via comments on VirusTotal.")
-    parser.add_argument('-p', '--profile', dest='profile', choices=profiles, default='default', help='select the ace instance you want to work with.')
+    parser.add_argument('-p', '--profile', dest='profile', choices=profiles, default='public', help='select the ace instance. Default: {}'.format(config['public']['remote_host']))
     parser.add_argument('resource', help='either a md5/sha1/sha256 hash, OR a URL, OR a path to a local file')
     parser.add_argument('-n', '--vt-download', action='store_true', help='Download File from VT')
     parser.add_argument('-s', '--vt-search', action='store_true', help="Search for a hash/URL on VT")
     parser.add_argument('-d', '--description', action='store', default=None, help='A description to give the ACE alert (default: resource).')
+    parser.add_argument('-u', '--uuid', action='store', help='An alert uuid to use to make the VT comment')
     parser.add_argument('--force-ace-alert', dest='force', action='store_true', help='Analysis mode set to correlation and VT results ignored')
-    parser.add_argument('--no-comment', action='store_true', help="Don't commend on VT.")
+    parser.add_argument('--no-comment', action='store_true', help="Don't comment on VT.")
     args = parser.parse_args()
 
     proxies = {}
@@ -259,7 +258,7 @@ def main():
         else:
             print("Resource is in the VT dataset: {}".format(vtr.results['permalink']))
 
-
+        args.no_comment = True if config[args.profile].getboolean('no_vt_comment') else args.no_comment
         remote_host = config[args.profile]['remote_host']
         ssl_ca_path = config[args.profile]['ca_bundle_file']
         if config[args.profile].getboolean('ignore_system_proxy'):
@@ -268,15 +267,21 @@ def main():
         ace_api.set_default_remote_host(remote_host)
         ace_api.set_default_ssl_ca_path(ssl_ca_path)
         if not args.description:
-            args.description = args.resource
+            if vtr.greatest_common_filename:
+                args.description = vtr.greatest_common_filename
+            else:
+                args.description = args.resource
         analysis = ace_api.Analysis(description=args.description,
                                     analysis_mode=analysis_mode,
                                     tool='VT ACE Agent')
         cp_result = None
-        if vtr.result_type == 'file':
+        if args.uuid:
+            analysis.uuid = args.uuid
+        elif vtr.result_type == 'file':
             if not vtr.file_path:
                 vtr.download()
-            analysis.add_file(vtr.file_path)
+            relative_storage_path = vtr.greatest_common_filename if vtr.greatest_common_filename else os.path.basename(vtr.file_path)
+            analysis.add_file(vtr.file_path, relative_storage_path=relative_storage_path)
             analysis.submit()
         elif vtr.result_type == 'url':
             cp_result = ace_api.cloudphish_submit(vtr.url)
@@ -284,12 +289,12 @@ def main():
             if 'uuid' in cp_result:
                 # this is a little miss-leading
                 analysis.uuid = cp_result['uuid']
-
+ 
         if not analysis.uuid:
             print("Problem submitting analysis to ACE : {}".format(analysis))
             sys.exit(1)
 
-        print("Submitted Analysis to ACE: UUID = {}".format(analysis.uuid))
+        print("Got Analysis UUID = {}".format(analysis.uuid))
 
         alert = False
         status_check_attempts = 20

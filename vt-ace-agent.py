@@ -208,6 +208,83 @@ def build_vt_comment(alert):
 
     return comment_text
 
+def vt_ace_agent(vtr, remote_host, ssl_verification=None, description=None, ignore_proxy=False, uuid=None, force_alert=False, no_comment=False, *args, **kwargs):
+    assert isinstance(vtr, VT_Resource)
+    analysis_mode = 'analysis'
+    if force_alert:
+        analysis_mode = 'correlation'
+
+    # Is this resource in VT?
+    if not vtr.in_vt:
+        print("Unknown to VT: {}".format(vtr.results['verbose_msg']))
+        if not force_alert:
+            return False
+    else:
+        print("Resource is in the VT dataset: {}".format(vtr.results['permalink']))
+
+    if ignore_proxy:
+        if 'https_proxy' in os.environ:
+            del os.environ['https_proxy']
+    ace_api.set_default_remote_host(remote_host)
+    ace_api.set_default_ssl_ca_path(ssl_verification)
+    if description:
+        if vtr.greatest_common_filename:
+            description = vtr.greatest_common_filename
+        else:
+            description = vtr.resource
+    analysis = ace_api.Analysis(description=description,
+                                analysis_mode=analysis_mode,
+                                tool='VT ACE Agent')
+    cp_result = None
+    if uuid:
+        analysis.uuid = uuid
+    elif vtr.result_type == 'file':
+        if not vtr.file_path:
+            vtr.download()
+        relative_storage_path = vtr.greatest_common_filename if vtr.greatest_common_filename else os.path.basename(vtr.file_path)
+        analysis.add_file(vtr.file_path, relative_storage_path=relative_storage_path)
+        analysis.submit()
+    elif vtr.result_type == 'url':
+        cp_result = ace_api.cloudphish_submit(vtr.url)
+        #analysis.add_url(vtr.url, directives=['crawl'])
+        if 'uuid' in cp_result:
+            # this is a little miss-leading
+            analysis.uuid = cp_result['uuid']
+
+    if not analysis.uuid:
+        print("Problem submitting analysis to ACE : {}".format(analysis))
+        return True
+
+    print("Got Analysis UUID = {}".format(analysis.uuid))
+
+    alert = False
+    status_check_attempts = 20
+    status = analysis.status
+    for i in range(status_check_attempts):
+        print("\tAnalysis status: {}".format(status))
+        if 'COMPLETE' in status:
+            try:
+                complete = ace_api.get_analysis_status(analysis.uuid)
+                alert = complete['result']['alert']
+            except:
+                pass
+            break
+        time.sleep(5)
+        status = analysis.status
+    else:
+        print("Gave up waiting for ACE to complete the Analysis.")
+
+    if alert:
+        comment_text = build_vt_comment(analysis)
+        ace_web_url = 'https://{}/ace/analysis?direct={}'.format(analysis.remote_host, analysis.uuid)
+        print("The Analysis became an Alert with {} detections: \n\tUUID = {}\n\tACE URL: {}".format(alert['detection_count'], analysis.uuid, ace_web_url))
+        print("\nVT Comment Text:\n")
+        print(comment_text)
+        if not no_comment:
+            pprint.pprint(vtr.make_comment(comment_text))
+        print()
+    return True
+
 def main():
     DEFAULT_DIR = '/opt/vt-ace-agent/'
     config_path = os.path.join(DEFAULT_DIR, "etc", "vt-ace-agent.ini")
@@ -246,6 +323,15 @@ def main():
     elif args.vt_download:
         sys.exit(vtr.download())
     else:
+        
+        result = vt_ace_agent(vtr, config[args.profile]['remote_host'],
+                              ssl_verification=config[args.profile]['ca_bundle_file'],
+                              description=args.description,
+                              ignore_proxy=config[args.profile].getboolean('ignore_system_proxy'),
+                              uuid=args.uuid,
+                              force_alert=args.force,
+                              no_comment=args.no_comment)
+        return result
         analysis_mode = 'analysis'
         if args.force:
             analysis_mode = 'correlation'
